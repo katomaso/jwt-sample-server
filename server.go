@@ -12,7 +12,6 @@ The server provides few pages:
 package main
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -28,7 +27,7 @@ import (
 )
 
 var (
-	secret = []byte("wow-much-secret-so-secure") // used for JWT Token signing
+	secret = []byte("secret") // []byte("wow-much-secret-so-secure") // used for JWT Token signing
 )
 
 // Header of JWT Bearer token (the part before the first dot)
@@ -37,10 +36,12 @@ type Header struct {
 	typ string
 }
 
+// python-like map
+type Dict map[string]interface{}
+
 // Token hold all Bearer data (without signature)
 type Token struct {
-	header  Header
-	payload map[string]string
+	header, payload Dict
 }
 
 /*
@@ -48,22 +49,24 @@ Encode JWT Token structure into base64 string with HMAC SHA256 signature
 */
 func (token *Token) Encode() string {
 	var (
-		buffer                bytes.Buffer
-		bufferB64             = base64.NewEncoder(base64.RawURLEncoding, &buffer)
-		headerLen, payloadLen int
+		enc          = base64.RawURLEncoding
+		header       = []byte(`{"alg":"HS256","typ":"JWT"}`)                         // enJSON(token.header)
+		payload      = []byte(`{"sub":"1234567890","name":"John Doe","admin":true}`) // enJSON(token.payload)
+		signature    []byte
+		headerLen    = enc.EncodedLen(len(header))
+		payloadLen   = enc.EncodedLen(len(payload))
+		signatureLen = enc.EncodedLen(sha256.Size)
+		data64       = make([]byte, headerLen+1+payloadLen+1+signatureLen)
 	)
-	bufferB64.Write(enJSON(token.header))
-	headerLen = buffer.Len()
-	bufferB64.Write(enJSON(token.payload))
-	payloadLen = buffer.Len()
-	bufferB64.Write(signHS256(buffer.Bytes(), secret))
+	fmt.Printf("SHA256.Size %d, SHA256.SizeEncoded %d\n", sha256.Size, signatureLen)
+	enc.Encode(data64[0:headerLen], header)
+	data64[headerLen] = '.'
+	enc.Encode(data64[headerLen+1:headerLen+1+payloadLen], payload)
 
-	return ("Bearer " +
-		buffer.String()[:headerLen] +
-		"." +
-		buffer.String()[headerLen:payloadLen] +
-		"." +
-		buffer.String()[payloadLen:])
+	signature = signHS256(data64[:headerLen+1+payloadLen], secret)
+	data64[headerLen+1+payloadLen] = '.'
+	enc.Encode(data64[headerLen+1+payloadLen+1:], signature)
+	return "Bearer " + string(data64)
 }
 
 /*
@@ -71,10 +74,11 @@ NewJWT creates an empty Bearer Token with correct header
 */
 func NewJWT() Token {
 	var token = new(Token)
-	token.header = Header{"HS256", "JWT"}
-	token.payload = map[string]string{
-		"uid": string(randID()),
-		"usr": "not-set",
+	token.header = Dict{"alg": "HS256", "typ": "JWT"}
+	token.payload = Dict{
+		"sub":   "1234567890",
+		"name":  "John Doe",
+		"admin": true,
 	}
 	return *token
 }
@@ -82,24 +86,22 @@ func NewJWT() Token {
 /*
 DecodeToken decodes token from HTTP Authotization header
 */
-func DecodeToken(src string) Token {
+func DecodeToken(src string) (token Token) {
 	var (
-		header  Header
-		payload map[string]string
+		parts = strings.Split(src[8:], ".") // cut off "Bearer" from the start
 	)
-	parts := strings.Split(src[8:], ".") // cut off "Bearer" from the start
 
 	data, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
 		log.Fatal("Invalid base64 token.header")
 	}
-	deJSON(data, header)
+	deJSON(data, token.header)
 	data, err = base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		log.Fatal("Invalid base64 token.payload")
 	}
-	deJSON(data, payload)
-	return Token{header, payload}
+	deJSON(data, token.payload)
+	return token
 }
 
 func enJSON(obj interface{}) []byte {
@@ -118,7 +120,8 @@ func deJSON(data []byte, obj interface{}) {
 
 func signHS256(toSign, secret []byte) []byte {
 	encoder := hmac.New(sha256.New, secret)
-	return encoder.Sum(toSign)
+	encoder.Write(toSign)
+	return encoder.Sum(nil)
 }
 
 func randID() int {
@@ -161,7 +164,9 @@ func login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		token.payload["username"] = r.FormValue("username")
 	}
-	w.Header().Set("Authorization", token.Encode())
+	encodedToken := token.Encode()
+	fmt.Printf("%q\n", encodedToken)
+	w.Header().Set("Authorization", encodedToken)
 	t, err := template.New("login").Parse(`<!DOCTYPE html>
 <html>
 <head>
